@@ -17,146 +17,319 @@
 package rpc
 
 import (
+	"bufio"
+	"bytes"
 	"context"
-	"encoding/json"
+	"errors"
+	"io"
 	"net"
-	"reflect"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
-type Service struct{}
-
-type Args struct {
-	S string
-}
-
-func (s *Service) NoArgsRets() {
-}
-
-type Result struct {
-	String string
-	Int    int
-	Args   *Args
-}
-
-func (s *Service) Echo(str string, i int, args *Args) Result {
-	return Result{str, i, args}
-}
-
-func (s *Service) EchoWithCtx(ctx context.Context, str string, i int, args *Args) Result {
-	return Result{str, i, args}
-}
-
-func (s *Service) Sleep(ctx context.Context, duration time.Duration) {
-	select {
-	case <-time.After(duration):
-	case <-ctx.Done():
-	}
-}
-
-func (s *Service) Rets() (string, error) {
-	return "", nil
-}
-
-func (s *Service) InvalidRets1() (error, string) {
-	return nil, ""
-}
-
-func (s *Service) InvalidRets2() (string, string) {
-	return "", ""
-}
-
-func (s *Service) InvalidRets3() (string, string, error) {
-	return "", "", nil
-}
-
-func (s *Service) Subscription(ctx context.Context) (*Subscription, error) {
-	return nil, nil
-}
-
 func TestServerRegisterName(t *testing.T) {
-	server := NewServer()
-	service := new(Service)
+	t.Parallel()
 
-	if err := server.RegisterName("calc", service); err != nil {
+	server := NewServer()
+	service := new(testService)
+
+	svcName := "test"
+	if err := server.RegisterName(svcName, service); err != nil {
 		t.Fatalf("%v", err)
 	}
 
-	if len(server.services) != 2 {
-		t.Fatalf("Expected 2 service entries, got %d", len(server.services))
+	if len(server.services.services) != 2 {
+		t.Fatalf("Expected 2 service entries, got %d", len(server.services.services))
 	}
 
-	svc, ok := server.services["calc"]
+	svc, ok := server.services.services[svcName]
 	if !ok {
-		t.Fatalf("Expected service calc to be registered")
+		t.Fatalf("Expected service %s to be registered", svcName)
 	}
 
-	if len(svc.callbacks) != 5 {
-		t.Errorf("Expected 5 callbacks for service 'calc', got %d", len(svc.callbacks))
-	}
-
-	if len(svc.subscriptions) != 1 {
-		t.Errorf("Expected 1 subscription for service 'calc', got %d", len(svc.subscriptions))
+	wantCallbacks := 14
+	if len(svc.callbacks) != wantCallbacks {
+		t.Errorf("Expected %d callbacks for service 'service', got %d", wantCallbacks, len(svc.callbacks))
 	}
 }
 
-func testServerMethodExecution(t *testing.T, method string) {
-	server := NewServer()
-	service := new(Service)
+func TestServer(t *testing.T) {
+	t.Parallel()
 
-	if err := server.RegisterName("test", service); err != nil {
-		t.Fatalf("%v", err)
+	files, err := os.ReadDir("testdata")
+	if err != nil {
+		t.Fatal("where'd my testdata go?")
 	}
+	for _, f := range files {
+		if f.IsDir() || strings.HasPrefix(f.Name(), ".") {
+			continue
+		}
+		path := filepath.Join("testdata", f.Name())
+		name := strings.TrimSuffix(f.Name(), filepath.Ext(f.Name()))
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 
-	stringArg := "string arg"
-	intArg := 1122
-	argsArg := &Args{"abcde"}
-	params := []interface{}{stringArg, intArg, argsArg}
+			runTestScript(t, path)
+		})
+	}
+}
 
-	request := map[string]interface{}{
-		"id":      12345,
-		"method":  "test_" + method,
-		"version": "2.0",
-		"params":  params,
+func runTestScript(t *testing.T, file string) {
+	server := newTestServer()
+	server.SetBatchLimits(4, 100000)
+	content, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
 	}
 
 	clientConn, serverConn := net.Pipe()
 	defer clientConn.Close()
-
-	go server.ServeCodec(NewJSONCodec(serverConn), OptionMethodInvocation)
-
-	out := json.NewEncoder(clientConn)
-	in := json.NewDecoder(clientConn)
-
-	if err := out.Encode(request); err != nil {
-		t.Fatal(err)
-	}
-
-	response := jsonSuccessResponse{Result: &Result{}}
-	if err := in.Decode(&response); err != nil {
-		t.Fatal(err)
-	}
-
-	if result, ok := response.Result.(*Result); ok {
-		if result.String != stringArg {
-			t.Errorf("expected %s, got : %s\n", stringArg, result.String)
+	go server.ServeCodec(NewCodec(serverConn), 0)
+	readbuf := bufio.NewReader(clientConn)
+	for _, line := range strings.Split(string(content), "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case len(line) == 0 || strings.HasPrefix(line, "//"):
+			// skip comments, blank lines
+			continue
+		case strings.HasPrefix(line, "--> "):
+			t.Log(line)
+			// write to connection
+			clientConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+			if _, err := io.WriteString(clientConn, line[4:]+"\n"); err != nil {
+				t.Fatalf("write error: %v", err)
+			}
+		case strings.HasPrefix(line, "<-- "):
+			t.Log(line)
+			want := line[4:]
+			// read line from connection and compare text
+			clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+			sent, err := readbuf.ReadString('\n')
+			if err != nil {
+				t.Fatalf("read error: %v", err)
+			}
+			sent = strings.TrimRight(sent, "\r\n")
+			if sent != want {
+				t.Errorf("wrong line from server\ngot:  %s\nwant: %s", sent, want)
+			}
+		default:
+			panic("invalid line in test script: " + line)
 		}
-		if result.Int != intArg {
-			t.Errorf("expected %d, got %d\n", intArg, result.Int)
-		}
-		if !reflect.DeepEqual(result.Args, argsArg) {
-			t.Errorf("expected %v, got %v\n", argsArg, result)
-		}
-	} else {
-		t.Fatalf("invalid response: expected *Result - got: %T", response.Result)
 	}
 }
 
-func TestServerMethodExecution(t *testing.T) {
-	testServerMethodExecution(t, "echo")
+// This test checks that responses are delivered for very short-lived connections that
+// only carry a single request.
+func TestServerShortLivedConn(t *testing.T) {
+	t.Parallel()
+
+	server := newTestServer()
+	defer server.Stop()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal("can't listen:", err)
+	}
+	defer listener.Close()
+	go server.ServeListener(listener)
+
+	var (
+		request  = `{"jsonrpc":"2.0","id":1,"method":"rpc_modules"}` + "\n"
+		wantResp = `{"jsonrpc":"2.0","id":1,"result":{"nftest":"1.0","rpc":"1.0","test":"1.0"}}` + "\n"
+		deadline = time.Now().Add(10 * time.Second)
+	)
+	for i := 0; i < 20; i++ {
+		conn, err := net.Dial("tcp", listener.Addr().String())
+		if err != nil {
+			t.Fatal("can't dial:", err)
+		}
+
+		conn.SetDeadline(deadline)
+		// Write the request, then half-close the connection so the server stops reading.
+		conn.Write([]byte(request))
+		conn.(*net.TCPConn).CloseWrite()
+		// Now try to get the response.
+		buf := make([]byte, 2000)
+		n, err := conn.Read(buf)
+		conn.Close()
+
+		if err != nil {
+			t.Fatal("read error:", err)
+		}
+		if !bytes.Equal(buf[:n], []byte(wantResp)) {
+			t.Fatalf("wrong response: %s", buf[:n])
+		}
+	}
 }
 
-func TestServerMethodWithCtx(t *testing.T) {
-	testServerMethodExecution(t, "echoWithCtx")
+func TestServerBatchResponseSizeLimit(t *testing.T) {
+	t.Parallel()
+
+	server := newTestServer()
+	defer server.Stop()
+	server.SetBatchLimits(100, 60)
+	var (
+		batch  []BatchElem
+		client = DialInProc(server)
+	)
+	for i := 0; i < 5; i++ {
+		batch = append(batch, BatchElem{
+			Method: "test_echo",
+			Args:   []any{"x", 1},
+			Result: new(echoResult),
+		})
+	}
+	if err := client.BatchCall(batch); err != nil {
+		t.Fatal("error sending batch:", err)
+	}
+	for i := range batch {
+		// We expect the first two queries to be ok, but after that the size limit takes effect.
+		if i < 2 {
+			if batch[i].Error != nil {
+				t.Fatalf("batch elem %d has unexpected error: %v", i, batch[i].Error)
+			}
+			continue
+		}
+		// After two, we expect an error.
+		re, ok := batch[i].Error.(Error)
+		if !ok {
+			t.Fatalf("batch elem %d has wrong error: %v", i, batch[i].Error)
+		}
+		wantedCode := errcodeResponseTooLarge
+		if re.ErrorCode() != wantedCode {
+			t.Errorf("batch elem %d wrong error code, have %d want %d", i, re.ErrorCode(), wantedCode)
+		}
+	}
+}
+
+// TestServerBatchResponseSizeLimit_errorResponses verifies that error responses
+// are counted toward BatchResponseMaxSize.
+func TestServerBatchResponseSizeLimit_errorResponses(t *testing.T) {
+	t.Parallel()
+
+	server := newTestServer()
+	defer server.Stop()
+	// Each error response for test_returnError is ~58 bytes of JSON in the Error field.
+	// Set limit to 100 so 1 response fits (58 bytes) but the 2nd (116 bytes) exceeds it.
+	server.SetBatchLimits(100, 100)
+	var (
+		batch  []BatchElem
+		client = DialInProc(server)
+	)
+	for i := 0; i < 5; i++ {
+		batch = append(batch, BatchElem{
+			Method: "test_returnError",
+			Result: new(int),
+		})
+	}
+	if err := client.BatchCall(batch); err != nil {
+		t.Fatal("error sending batch:", err)
+	}
+	for i := range batch {
+		re, ok := batch[i].Error.(Error)
+		if !ok {
+			t.Fatalf("batch elem %d has wrong error type: %v", i, batch[i].Error)
+		}
+		if i < 2 {
+			// First two: elem 0 fits under limit, elem 1 pushes over but is already processed.
+			if re.ErrorCode() != 444 {
+				t.Errorf("batch elem %d wrong error code, have %d want 444", i, re.ErrorCode())
+			}
+		} else {
+			// Remaining should be the response-too-large error.
+			if re.ErrorCode() != errcodeResponseTooLarge {
+				t.Errorf("batch elem %d wrong error code, have %d want %d", i, re.ErrorCode(), errcodeResponseTooLarge)
+			}
+		}
+	}
+}
+
+func TestServerWebsocketReadLimit(t *testing.T) {
+	t.Parallel()
+
+	// Test different read limits
+	testCases := []struct {
+		name       string
+		readLimit  int64
+		testSize   int
+		shouldFail bool
+	}{
+		{
+			name:       "limit with small request - should succeed",
+			readLimit:  4096, // generous limit to comfortably allow JSON overhead
+			testSize:   256,  // reasonably small payload
+			shouldFail: false,
+		},
+		{
+			name:       "limit with large request - should fail",
+			readLimit:  256,  // tight limit to trigger server-side read limit
+			testSize:   1024, // payload that will exceed the limit including JSON overhead
+			shouldFail: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Create server and set read limits
+			srv := newTestServer()
+			srv.SetWebsocketReadLimit(tc.readLimit)
+			defer srv.Stop()
+
+			// Start HTTP server with WebSocket handler
+			httpsrv := httptest.NewServer(srv.WebsocketHandler([]string{"*"}))
+			defer httpsrv.Close()
+
+			wsURL := "ws:" + strings.TrimPrefix(httpsrv.URL, "http:")
+
+			// Connect WebSocket client
+			client, err := DialOptions(context.Background(), wsURL)
+			if err != nil {
+				t.Fatalf("can't dial: %v", err)
+			}
+			defer client.Close()
+
+			// Create large request data - this is what will be limited
+			largeString := strings.Repeat("A", tc.testSize)
+
+			// Send the large string as a parameter in the request
+			var result echoResult
+			err = client.Call(&result, "test_echo", largeString, 42, &echoArgs{S: "test"})
+
+			if tc.shouldFail {
+				// Expecting an error due to read limit exceeded
+				if err == nil {
+					t.Fatalf("expected error for request size %d with limit %d, but got none", tc.testSize, tc.readLimit)
+				}
+				// Be tolerant about the exact error surfaced by gorilla/websocket.
+				// Prefer a CloseError with code 1009, but accept ErrReadLimit or an error string containing 1009/message too big.
+				var cerr *websocket.CloseError
+				if errors.As(err, &cerr) {
+					if cerr.Code != websocket.CloseMessageTooBig {
+						t.Fatalf("unexpected websocket close code: have %d want %d (err=%v)", cerr.Code, websocket.CloseMessageTooBig, err)
+					}
+				} else if !errors.Is(err, websocket.ErrReadLimit) &&
+					!strings.Contains(strings.ToLower(err.Error()), "1009") &&
+					!strings.Contains(strings.ToLower(err.Error()), "message too big") &&
+					!strings.Contains(strings.ToLower(err.Error()), "connection reset by peer") {
+					// Not the error we expect from exceeding the message size limit.
+					t.Fatalf("unexpected error for read limit violation: %v", err)
+				}
+			} else {
+				// Expecting success
+				if err != nil {
+					t.Fatalf("unexpected error for request size %d with limit %d: %v", tc.testSize, tc.readLimit, err)
+				}
+				// Verify the response is correct - the echo should return our string
+				if result.String != largeString {
+					t.Fatalf("expected echo result to match input")
+				}
+			}
+		})
+	}
 }

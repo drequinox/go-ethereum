@@ -27,10 +27,10 @@ import (
 
 // insertStats tracks and reports on block insertion.
 type insertStats struct {
-	queued, processed, ignored int
-	usedGas                    uint64
-	lastIndex                  int
-	startTime                  mclock.AbsTime
+	processed, ignored int
+	usedGas            uint64
+	lastIndex          int
+	startTime          mclock.AbsTime
 }
 
 // statsReportLimit is the time limit during import and export after which we
@@ -39,11 +39,12 @@ const statsReportLimit = 8 * time.Second
 
 // report prints statistics if some number of blocks have been processed
 // or more than a few seconds have passed since the last message.
-func (st *insertStats) report(chain []*types.Block, index int, cache common.StorageSize) {
+func (st *insertStats) report(chain []*types.Block, index int, snapDiffItems, snapBufItems, trieDiffNodes, triebufNodes common.StorageSize, setHead bool) {
 	// Fetch the timings for the batch
 	var (
 		now     = mclock.Now()
-		elapsed = time.Duration(now) - time.Duration(st.startTime)
+		elapsed = now.Sub(st.startTime) + 1 // prevent zero division
+		mgasps  = float64(st.usedGas) * 1000 / float64(elapsed)
 	)
 	// If we're at the last block of the batch or report period reached, log
 	if index == len(chain)-1 || elapsed >= statsReportLimit {
@@ -56,23 +57,32 @@ func (st *insertStats) report(chain []*types.Block, index int, cache common.Stor
 
 		// Assemble the log context and send it to the logger
 		context := []interface{}{
-			"blocks", st.processed, "txs", txs, "mgas", float64(st.usedGas) / 1000000,
-			"elapsed", common.PrettyDuration(elapsed), "mgasps", float64(st.usedGas) * 1000 / float64(elapsed),
 			"number", end.Number(), "hash", end.Hash(),
+			"blocks", st.processed, "txs", txs, "mgas", float64(st.usedGas) / 1000000,
+			"elapsed", common.PrettyDuration(elapsed), "mgasps", mgasps,
 		}
-		if timestamp := time.Unix(end.Time().Int64(), 0); time.Since(timestamp) > time.Minute {
+		if timestamp := time.Unix(int64(end.Time()), 0); time.Since(timestamp) > time.Minute {
 			context = append(context, []interface{}{"age", common.PrettyAge(timestamp)}...)
 		}
-		context = append(context, []interface{}{"cache", cache}...)
-
-		if st.queued > 0 {
-			context = append(context, []interface{}{"queued", st.queued}...)
+		if snapDiffItems != 0 || snapBufItems != 0 { // snapshots enabled
+			context = append(context, []interface{}{"snapdiffs", snapDiffItems}...)
+			if snapBufItems != 0 { // future snapshot refactor
+				context = append(context, []interface{}{"snapdirty", snapBufItems}...)
+			}
 		}
+		if trieDiffNodes != 0 { // pathdb
+			context = append(context, []interface{}{"triediffs", trieDiffNodes}...)
+		}
+		context = append(context, []interface{}{"triedirty", triebufNodes}...)
+
 		if st.ignored > 0 {
 			context = append(context, []interface{}{"ignored", st.ignored}...)
 		}
-		log.Info("Imported new chain segment", context...)
-
+		if setHead {
+			log.Info("Imported new chain segment", context...)
+		} else {
+			log.Info("Imported new potential chain segment", context...)
+		}
 		// Bump the stats reported to the next section
 		*st = insertStats{startTime: now, lastIndex: index + 1}
 	}
@@ -80,10 +90,13 @@ func (st *insertStats) report(chain []*types.Block, index int, cache common.Stor
 
 // insertIterator is a helper to assist during chain import.
 type insertIterator struct {
-	chain     types.Blocks
-	results   <-chan error
-	index     int
-	validator Validator
+	chain types.Blocks // Chain of blocks being iterated over
+
+	results <-chan error // Verification result sink from the consensus engine
+	errors  []error      // Header verification errors for the blocks
+
+	index     int       // Current offset of the iterator
+	validator Validator // Validator to run if verification succeeds
 }
 
 // newInsertIterator creates a new iterator based on the given blocks, which are
@@ -92,6 +105,7 @@ func newInsertIterator(chain types.Blocks, results <-chan error, validator Valid
 	return &insertIterator{
 		chain:     chain,
 		results:   results,
+		errors:    make([]error, 0, len(chain)),
 		index:     -1,
 		validator: validator,
 	}
@@ -100,44 +114,40 @@ func newInsertIterator(chain types.Blocks, results <-chan error, validator Valid
 // next returns the next block in the iterator, along with any potential validation
 // error for that block. When the end is reached, it will return (nil, nil).
 func (it *insertIterator) next() (*types.Block, error) {
+	// If we reached the end of the chain, abort
 	if it.index+1 >= len(it.chain) {
 		it.index = len(it.chain)
 		return nil, nil
 	}
+	// Advance the iterator and wait for verification result if not yet done
 	it.index++
-	if err := <-it.results; err != nil {
-		return it.chain[it.index], err
+	if len(it.errors) <= it.index {
+		it.errors = append(it.errors, <-it.results)
 	}
+	if it.errors[it.index] != nil {
+		return it.chain[it.index], it.errors[it.index]
+	}
+	// Block header valid, run body validation and return
 	return it.chain[it.index], it.validator.ValidateBody(it.chain[it.index])
 }
 
-// current returns the current block that's being processed.
-func (it *insertIterator) current() *types.Block {
-	if it.index < 0 || it.index+1 >= len(it.chain) {
-		return nil
-	}
-	return it.chain[it.index]
-}
-
-// previous returns the previous block was being processed, or nil
-func (it *insertIterator) previous() *types.Block {
+// previous returns the previous header that was being processed, or nil.
+func (it *insertIterator) previous() *types.Header {
 	if it.index < 1 {
 		return nil
 	}
-	return it.chain[it.index-1]
+	return it.chain[it.index-1].Header()
 }
 
-// first returns the first block in the it.
-func (it *insertIterator) first() *types.Block {
-	return it.chain[0]
+// current returns the current header that is being processed, or nil.
+func (it *insertIterator) current() *types.Header {
+	if it.index == -1 || it.index >= len(it.chain) {
+		return nil
+	}
+	return it.chain[it.index].Header()
 }
 
 // remaining returns the number of remaining blocks.
 func (it *insertIterator) remaining() int {
 	return len(it.chain) - it.index
-}
-
-// processed returns the number of processed blocks.
-func (it *insertIterator) processed() int {
-	return it.index + 1
 }

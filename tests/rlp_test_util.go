@@ -42,11 +42,24 @@ type RLPTest struct {
 	Out string
 }
 
+// FromHex returns the bytes represented by the hexadecimal string s.
+// s may be prefixed with "0x".
+// This is copy-pasted from bytes.go, which does not return the error
+func FromHex(s string) ([]byte, error) {
+	if len(s) > 1 && (s[0:2] == "0x" || s[0:2] == "0X") {
+		s = s[2:]
+	}
+	if len(s)%2 == 1 {
+		s = "0" + s
+	}
+	return hex.DecodeString(s)
+}
+
 // Run executes the test.
 func (t *RLPTest) Run() error {
-	outb, err := hex.DecodeString(t.Out)
+	outb, err := FromHex(t.Out)
 	if err != nil {
-		return fmt.Errorf("invalid hex in Out")
+		return errors.New("invalid hex in Out")
 	}
 
 	// Handle simple decoding tests with no actual In value.
@@ -74,7 +87,7 @@ func checkDecodeInterface(b []byte, isValid bool) error {
 	case isValid && err != nil:
 		return fmt.Errorf("decoding failed: %v", err)
 	case !isValid && err == nil:
-		return fmt.Errorf("decoding of invalid value succeeded")
+		return errors.New("decoding of invalid value succeeded")
 	}
 	return nil
 }
@@ -111,7 +124,7 @@ func translateJSON(v interface{}) interface{} {
 func checkDecodeFromJSON(s *rlp.Stream, exp interface{}) error {
 	switch exp := exp.(type) {
 	case uint64:
-		i, err := s.Uint()
+		i, err := s.Uint64()
 		if err != nil {
 			return addStack("Uint", exp, err)
 		}

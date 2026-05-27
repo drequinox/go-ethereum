@@ -23,13 +23,16 @@ import (
 	"math/big"
 	"reflect"
 	"strconv"
+
+	"github.com/holiman/uint256"
 )
 
 var (
-	bytesT  = reflect.TypeOf(Bytes(nil))
-	bigT    = reflect.TypeOf((*Big)(nil))
-	uintT   = reflect.TypeOf(Uint(0))
-	uint64T = reflect.TypeOf(Uint64(0))
+	bytesT  = reflect.TypeFor[Bytes]()
+	bigT    = reflect.TypeFor[*Big]()
+	uintT   = reflect.TypeFor[Uint]()
+	uint64T = reflect.TypeFor[Uint64]()
+	u256T   = reflect.TypeFor[*uint256.Int]()
 )
 
 // Bytes marshals/unmarshals as a JSON string with 0x prefix.
@@ -70,6 +73,25 @@ func (b *Bytes) UnmarshalText(input []byte) error {
 // String returns the hex encoding of b.
 func (b Bytes) String() string {
 	return Encode(b)
+}
+
+// ImplementsGraphQLType returns true if Bytes implements the specified GraphQL type.
+func (b Bytes) ImplementsGraphQLType(name string) bool { return name == "Bytes" }
+
+// UnmarshalGraphQL unmarshals the provided GraphQL query data.
+func (b *Bytes) UnmarshalGraphQL(input interface{}) error {
+	var err error
+	switch input := input.(type) {
+	case string:
+		data, err := Decode(input)
+		if err != nil {
+			return err
+		}
+		*b = data
+	default:
+		err = fmt.Errorf("unexpected type %T for Bytes", input)
+	}
+	return err
 }
 
 // UnmarshalFixedJSON decodes the input as a string with 0x prefix. The length of out
@@ -182,9 +204,74 @@ func (b *Big) ToInt() *big.Int {
 	return (*big.Int)(b)
 }
 
+func (b *Big) ToUint256() (*uint256.Int, bool) {
+	return uint256.FromBig((*big.Int)(b))
+}
+
 // String returns the hex encoding of b.
 func (b *Big) String() string {
 	return EncodeBig(b.ToInt())
+}
+
+// ImplementsGraphQLType returns true if Big implements the provided GraphQL type.
+func (b Big) ImplementsGraphQLType(name string) bool { return name == "BigInt" }
+
+// UnmarshalGraphQL unmarshals the provided GraphQL query data.
+func (b *Big) UnmarshalGraphQL(input interface{}) error {
+	var err error
+	switch input := input.(type) {
+	case string:
+		return b.UnmarshalText([]byte(input))
+	case int32:
+		var num big.Int
+		num.SetInt64(int64(input))
+		*b = Big(num)
+	default:
+		err = fmt.Errorf("unexpected type %T for BigInt", input)
+	}
+	return err
+}
+
+// U256 marshals/unmarshals as a JSON string with 0x prefix.
+// The zero value marshals as "0x0".
+type U256 uint256.Int
+
+// MarshalText implements encoding.TextMarshaler
+func (b U256) MarshalText() ([]byte, error) {
+	u256 := (*uint256.Int)(&b)
+	return []byte(u256.Hex()), nil
+}
+
+// UnmarshalJSON implements json.Unmarshaler.
+func (b *U256) UnmarshalJSON(input []byte) error {
+	// The uint256.Int.UnmarshalJSON method accepts "dec", "0xhex"; we must be
+	// more strict, hence we check string and invoke SetFromHex directly.
+	if !isString(input) {
+		return errNonString(u256T)
+	}
+	// The hex decoder needs to accept empty string ("") as '0', which uint256.Int
+	// would reject.
+	if len(input) == 2 {
+		(*uint256.Int)(b).Clear()
+		return nil
+	}
+	err := (*uint256.Int)(b).SetFromHex(string(input[1 : len(input)-1]))
+	if err != nil {
+		return &json.UnmarshalTypeError{Value: err.Error(), Type: u256T}
+	}
+	return nil
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler
+func (b *U256) UnmarshalText(input []byte) error {
+	// The uint256.Int.UnmarshalText method accepts "dec", "0xhex"; we must be
+	// more strict, hence we check string and invoke SetFromHex directly.
+	return (*uint256.Int)(b).SetFromHex(string(input))
+}
+
+// String returns the hex encoding of b.
+func (b *U256) String() string {
+	return (*uint256.Int)(b).Hex()
 }
 
 // Uint64 marshals/unmarshals as a JSON string with 0x prefix.
@@ -232,6 +319,23 @@ func (b *Uint64) UnmarshalText(input []byte) error {
 // String returns the hex encoding of b.
 func (b Uint64) String() string {
 	return EncodeUint64(uint64(b))
+}
+
+// ImplementsGraphQLType returns true if Uint64 implements the provided GraphQL type.
+func (b Uint64) ImplementsGraphQLType(name string) bool { return name == "Long" }
+
+// UnmarshalGraphQL unmarshals the provided GraphQL query data.
+func (b *Uint64) UnmarshalGraphQL(input interface{}) error {
+	var err error
+	switch input := input.(type) {
+	case string:
+		return b.UnmarshalText([]byte(input))
+	case int32:
+		*b = Uint64(input)
+	default:
+		err = fmt.Errorf("unexpected type %T for Long", input)
+	}
+	return err
 }
 
 // Uint marshals/unmarshals as a JSON string with 0x prefix.
