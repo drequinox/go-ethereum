@@ -1,0 +1,330 @@
+
+THORChain Asgard Vault Compromise — Proof of Concept
+=====================================================
+
+Reproduces the cryptographic primitive that enabled the May 15, 2026
+exploit of one of THORChain's six Asgard vaults (~$10.7M drained).
+
+The attack exploits a known vulnerability class in GG20 threshold ECDSA
+implementations: a single malicious participant in a key-generation
+ceremony can construct a malformed Paillier modulus that bypasses the
+library's structural checks, then use partial decryption to recover the
+other parties' secret key shares from Multiplicative-to-Additive (MtA)
+sub-protocol ciphertexts. With enough shares recovered, the master vault
+private key is reconstructable offline.
+
+THORChain ran a fork of Binance's tss-lib that never adopted the v2.0.0
+structural defenses (modProof + facProof, merged upstream via PR #206)
+that close this attack class. The same attack class was disclosed twice
+in 2023: Fireblocks BitForge (CVE-2023-33241, May 2023) and Verichains
+TSSHOCK (Black Hat USA, August 2023). Binance's v2.0.0 release notes
+explicitly cite both fixes.
+
+This script demonstrates:
+
+  1. Honest Paillier key generation and the legitimate use of the
+     additive homomorphism in the MtA sub-protocol.
+
+  2. The vulnerable structural check (trial division by small primes
+     only) that THORChain's fork performed.
+
+  3. The attack: malicious modulus N = p * q * r, where r is a small
+     prime known only to the attacker, passes the vulnerable check.
+
+  4. The recovery primitive: partial decryption modulo r yields the
+     honest peer's secret share in milliseconds.
+
+  5. The defense: modProof (Paillier-Blum) and facProof (NoSmallFactor),
+     either of which rejects the malicious modulus during keygen Round 2.
+
+Requires: gmpy2 (for arbitrary-precision arithmetic).
+    pip install gmpy2
+
+Run:
+    python3 thorchain_poc.py
+
+
+==============================================================================
+  STAGE 1: HEALTHY PAILLIER OPERATIONS (BASELINE)
+==============================================================================
+In an honest TSS ceremony, each of 18 nodes generates its own Paillier
+keypair. The public modulus N = p*q has ~2048 bits where p, q
+are random primes of ~1024 bits each.
+
+------------------------------------------------------------------------------
+  Generating one honest keypair
+------------------------------------------------------------------------------
+  Honest p:           1024 bits
+  Honest q:           1024 bits
+  N = p * q:          2048 bits
+  Generation time:    0.07 seconds
+
+------------------------------------------------------------------------------
+  Verifying Paillier homomorphism (used by MtA)
+------------------------------------------------------------------------------
+MtA requires Paillier's additive homomorphism: Enc(a) * Enc(b) = Enc(a+b).
+  Enc(12345) * Enc(67890) decrypts to 80235 (expected 80235): PASS
+
+==============================================================================
+  STAGE 2: CONSTRUCTING THE MALICIOUS MODULUS
+==============================================================================
+A malicious node operator (let's call them Node 7) does NOT generate
+an honest Paillier key. Instead, they construct N = p * q * r where:
+  - r is a secret prime they retain locally
+  - p, q are large primes such that N still has 2048 bits total
+
+This is the cryptographic primitive at the heart of TSSHOCK-class attacks.
+Fireblocks' CVE-2023-33241 advisory (May 2023) states:
+
+  "If a participant generates a Paillier modulus N containing small
+   factors (less than 2^100) they can interact with other participants
+   in the signing protocol to steal their secret key shares in as
+   little as sixteen signing attempts."
+
+Source: https://advisories.gitlab.com/pkg/golang/github.com/bnb-chain/tss-lib
+
+------------------------------------------------------------------------------
+  Generating malicious modulus (this takes ~1-2 seconds)
+------------------------------------------------------------------------------
+  Malicious r (secret factor):   300 bits
+  Malicious p (decoy):           874 bits
+  Malicious q (decoy):           874 bits
+  N = p * q * r:                 2048 bits
+  Generation time:               0.01 seconds
+
+  N (first 60 hex chars): 0xdd9dada077b6d154af82cfcdd8a34d30129125c4356285823cc734b20a...
+  r (first 60 hex chars): 0xe27877c0867ca7dd80b0545b06d2a38372811c6a0d76144840c2c7e108...   ← attacker keeps secret
+
+==============================================================================
+  STAGE 3: BYPASSING THE VULNERABLE CHECK
+==============================================================================
+The malicious modulus is broadcast to the other 17 honest committee
+members during keygen Round 1. Each honest node runs the library's
+structural check on it during Round 2.
+
+Here is what THORChain's tss-lib check does (semantically):
+  1. Check N is positive       (passes: N is positive)
+  2. Check N is odd            (passes: product of odd primes)
+  3. Check N has ~2048 bits  (passes: attacker sized it correctly)
+  4. Trial-divide by primes < 1000  (passes: r is 300 bits >> 1000)
+
+------------------------------------------------------------------------------
+  Running the vulnerable check on the malicious N
+------------------------------------------------------------------------------
+  Result:  ACCEPTED
+  Reason:  no factor < 1000; correct bit length; odd; positive
+
+  >>> The library accepts the malicious modulus. The 17 honest peers <<<
+  >>> will now use this modulus in the MtA sub-protocol.            <<<
+
+==============================================================================
+  STAGE 4: RECOVERING AN HONEST PEER'S SHARE
+==============================================================================
+During the MtA sub-protocol (Round 3 of GG20 keygen, and during every
+signing operation), each honest peer encrypts their secret share x_i
+under EVERY other peer's Paillier modulus, including the attacker's.
+
+Now the attacker uses their secret factor r to recover x_i from each
+such ciphertext via partial decryption modulo r.
+
+------------------------------------------------------------------------------
+  Simulating an honest peer encrypting their share
+------------------------------------------------------------------------------
+  Honest peer's secret share x_i:
+    0x4cea8168e0529bc5b1c20a312444ae271d097d6e71d0ec0b8b191399a4e12009
+    (255 bits, in Z_q where q = secp256k1 order)
+
+  Honest peer encrypts x_i under the attacker's malicious modulus N...
+    Ciphertext (first 60 hex chars): 0x6547fe23c1b65db68ad961938ab246045d4990b98d334b9657fe2cebf0...
+
+------------------------------------------------------------------------------
+  Attacker applies partial decryption with known r
+------------------------------------------------------------------------------
+  Math:
+    1. Reduce c mod r^2
+    2. Compute u = c^(r-1) mod r^2
+    3. Apply L_r(u) = (u - 1) / r
+    4. Compute k = (N / r) mod r
+    5. Recover x_i mod r = -L_r(u) * inv(k) mod r
+
+  Recovery time:           0.060 milliseconds
+
+  Honest peer's x_i:       0x4cea8168e0529bc5b1c20a312444ae271d097d6e71d0ec0b8b191399a4e12009
+  Attacker's recovered:    0x4cea8168e0529bc5b1c20a312444ae271d097d6e71d0ec0b8b191399a4e12009
+  Match:                   True
+
+  >>> The attacker has obtained the honest peer's secret share. <<<
+  >>> Repeated across all 17 honest peers in the committee,    <<<
+  >>> the attacker reassembles the full vault private key.      <<<
+
+==============================================================================
+  STAGE 5: THE DEFENSE (Binance tss-lib v2.0.0)
+==============================================================================
+Binance shipped tss-lib v2.0.0 in 2023, citing fixes for both:
+  - GHSA-5cjx-95fx-68q9 (Fireblocks disclosure, May 2023)
+  - The Verichains TSSHOCK disclosure (August 2023)
+
+The fix was merged via PR #206 ('Thor chain'), which added two
+structural zero-knowledge proofs in keygen Round 2:
+
+  1. modProof (Paillier-Blum proof)
+     File: crypto/modproof/proof.go in bnb-chain/tss-lib
+     Proves: N is a product of exactly two primes, both ≡ 3 mod 4.
+
+  2. facProof (NoSmallFactor proof)
+     File: crypto/facproof/proof.go in bnb-chain/tss-lib
+     Proves: N has no prime factor below a safe threshold (~2^100).
+
+Either proof alone catches the malicious modulus. Both are added
+defense-in-depth. The attacker cannot produce valid proofs because
+their N has more than 2 factors and contains a small factor r.
+
+Source: https://github.com/bnb-chain/tss-lib/pull/206
+Source: https://github.com/bnb-chain/tss-lib/releases/tag/v2.0.0
+
+------------------------------------------------------------------------------
+  Running modProof against the malicious N
+------------------------------------------------------------------------------
+  Attempt 1: attacker claims N = p * (q*r)
+    Result: REJECTED
+    Reason: REJECTED: claimed factor is not prime
+
+------------------------------------------------------------------------------
+  Running facProof against the malicious N
+------------------------------------------------------------------------------
+  facProof requires the prover to demonstrate no factor < 2^100.
+  The attacker's r is only 300 bits — but they also need r > 2^100,
+  which it is. So facProof at 2^100 threshold might NOT catch this
+  particular configuration. Let's check:
+    facProof @ 2^100: ACCEPTED
+    Reason: ACCEPTED: all factors > 2^100
+
+  In practice, the real-world attack uses a much smaller r (e.g. 40-80
+  bits) and recovers shares gradually over many signing sessions. The
+  Fireblocks advisory cites ~16 signing attempts for two-party recovery.
+
+  Let's demonstrate facProof catching a smaller-r variant:
+
+  Constructing a 40-bit-r variant (this matches the 'gradual leakage'
+  pattern that secondary sources describe as the actual May 15 incident):
+    Generation time: 0.02s, r = 40 bits
+    facProof @ 2^100: REJECTED
+    Reason: REJECTED: factor with 40 bits is below threshold of 2^100
+
+------------------------------------------------------------------------------
+  Summary: defense-in-depth
+------------------------------------------------------------------------------
+  | Variant            | modProof        | facProof (2^100) |
+  |--------------------|-----------------|------------------|
+  | Malicious 300-bit r | REJECTED       | (would accept)   |
+  | Malicious 40-bit r  | REJECTED       | REJECTED         |
+
+  Both proofs together close the entire attack class. Either proof
+  alone is sufficient to catch the 300-bit-r variant via modProof's
+  biprimality check; the smaller-r variants are caught by both.
+
+==============================================================================
+  STAGE 6: END-TO-END WITH v2.x DEFENSES ACTIVE
+==============================================================================
+Now we reverse the order: the malicious node tries the attack again,
+but this time the library has the v2.0.0 structural proofs enabled.
+
+------------------------------------------------------------------------------
+  Attacker constructs the same malicious N
+------------------------------------------------------------------------------
+  N constructed with 300-bit hidden factor r
+
+------------------------------------------------------------------------------
+  Honest peers run keygen Round 2 verification
+------------------------------------------------------------------------------
+  Step 1: vulnerable check (still runs as a sanity check)...
+           ACCEPTED — no factor < 1000; correct bit length; odd; positive
+  Step 2: modProof verification (new in v2.0.0)...
+           REJECTED — REJECTED: claimed factor is not prime
+
+  >>> Keygen ceremony ABORTS at Round 2.                            <<<
+  >>> Honest peers identify Node 7 as malicious.                    <<<
+  >>> Node 7's bond is slashed by the protocol's economic layer.    <<<
+  >>> The vault key is never created. Funds are never placed at risk.<<<
+
+==============================================================================
+  STAGE 7: WHAT THORCHAIN DIDN'T MERGE
+==============================================================================
+Disclosure timeline:
+
+  November 2021  Alpha-Rays (Shlomovits & Tymokhanov, ZenGo).
+                 First public disclosure of this attack family,
+                 targeting GG18/GG20. THORChain co-funded the
+                 $500K bug bounty.
+
+  May 2023       Fireblocks BitForge (CVE-2023-33241, GHSA-5cjx-95fx-68q9).
+                 Disclosure of the missing-Paillier-modulus-proofs class.
+                 Three distinct attacks across GG18, GG20, Lindell17.
+
+  August 2023    Verichains TSSHOCK (Black Hat USA 2023).
+                 Three additional attacks in the same family.
+
+  August 2023    Binance ships tss-lib v2.0.0 with:
+                   - modProof (Paillier-Blum biprimality)
+                   - facProof (NoSmallFactor)
+                   - Session-ID binding (anti-replay)
+                 Merged via PR #206 ('Thor chain'). The release notes
+                 explicitly cite fixes for both Fireblocks and Verichains.
+
+  August 2023    THORChain merges a 78-line tactical patch (v0.1.5).
+                 Addresses input-sanitation variants but does NOT
+                 backport the structural proofs from Binance v2.0.0.
+
+  November 2025  THORChain engages Silence Labs to migrate to DKLS
+                 (a modern TSS scheme with formal security proofs).
+                 Delivery targeted for Q1-Q2 2026.
+
+  May 12 2026    Malicious node thor16ucj... joins the THORChain
+                 active validator set.
+
+  May 13 2026    Node churned into TSS committee for new Asgard vault.
+                 Vault key generated; attacker extracts shares.
+
+  May 15 2026    Attacker drains the vault: ~36.75 BTC + ~$7M EVM
+                 = ~$10.7-10.8M across BTC, ETH, BNB Chain, Base.
+                 Network halted via Mimir governance 'make pause'.
+
+Sources:
+  - THORChain ADR-028 exploit report
+  - Hypernative incident report 2026-05-15
+  - Ledger CTO Charles Guillemet's published analysis
+  - bnb-chain/tss-lib v2.0.0 release notes
+  - bnb-chain/tss-lib PR #206
+  - Fireblocks advisory GHSA-5cjx-95fx-68q9
+
+==============================================================================
+  END OF DEMONSTRATION
+==============================================================================
+
+Summary:
+
+  - WHAT HAPPENED:  Single malicious node operator extracted the full
+                    private key of a THORChain Asgard vault during
+                    legitimate TSS operations. Drained ~$10.7-10.8M.
+
+  - HOW IT WORKED:  Constructed a Paillier modulus with hidden small
+                    factor that bypassed the library's structural
+                    check (trial division by primes < 1000). Used
+                    partial decryption modulo the hidden factor to
+                    recover other parties' secret shares from MtA
+                    ciphertexts.
+
+  - ROOT CAUSE:     THORChain's tss-lib never adopted the structural
+                    ZK proofs (modProof, facProof) that Binance 
+                    shipped as tss-lib v2.0.0 in 2023 to close this
+                    exact attack class. The fork drifted from
+                    upstream for 33 months.
+
+  - MITIGATION:     (1) Apply modProof + facProof in keygen Round 2;
+                    (2) Regenerate all active vault keys (existing
+                        keys may already be silently compromised);
+                    (3) Establish named ownership of upstream-tracking
+                        for cryptographic library dependencies;
+                    (4) Migrate to a TSS protocol with formal security
+                        proofs (DKLS, CGGMP21).
+
