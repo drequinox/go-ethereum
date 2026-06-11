@@ -1,0 +1,57 @@
+{
+  "ontology": {
+    "node_types": {
+      "Person": {"description": "A named individual in the community", "props": ["name", "role"]},
+      "Wallet": {"description": "A blockchain address owned by a person or organisation", "props": ["address"]},
+      "Organisation": {"description": "A DAO, marketplace, exchange or collective", "props": ["name", "category"]},
+      "NFTCollection": {"description": "A deployed NFT collection", "props": ["name", "symbol"]},
+      "Artwork": {"description": "An individual NFT piece", "props": ["title", "price_eth"]}
+    },
+    "edge_types": [
+      {"rel": "OWNS_WALLET", "domain": "Person", "range": "Wallet", "description": "person controls a wallet"},
+      {"rel": "RECEIVED_GRANT_FROM", "domain": "Person", "range": "Organisation", "description": "grant funding relationship"},
+      {"rel": "MEMBER_OF", "domain": "Person", "range": "Organisation", "description": "governance membership"},
+      {"rel": "PROVIDES_LIQUIDITY_TO", "domain": "Person", "range": "Organisation", "description": "LP relationship with a venue"},
+      {"rel": "CREATED", "domain": "Person", "range": "NFTCollection", "description": "artist deployed a collection"},
+      {"rel": "LISTED_ON", "domain": "NFTCollection", "range": "Organisation", "description": "collection listed on a marketplace"},
+      {"rel": "PART_OF", "domain": "Artwork", "range": "NFTCollection", "description": "piece belongs to a collection"},
+      {"rel": "PURCHASED", "domain": "Person", "range": "Artwork", "description": "collector bought a piece"},
+      {"rel": "PAYS_FEES_TO", "domain": "Organisation", "range": "Organisation", "description": "marketplace fee routing agreement"},
+      {"rel": "SUBSCRIBES_TO", "domain": "Person", "range": "Person", "description": "paid subscription to someone's service"}
+    ]
+  },
+  "extraction": {
+    "entities": [
+      {"id": "alice", "type": "Person", "label": "Alice", "props": {"role": "independent developer"}, "evidence": "a 25,000 USDC grant to Alice (wallet 0xALICE), an independent developer"},
+      {"id": "alice_wallet", "type": "Wallet", "label": "0xALICE", "props": {"address": "0xALICE"}, "evidence": "Alice (wallet 0xALICE)"},
+      {"id": "bob", "type": "Person", "label": "Bob", "props": {"role": "DAO council member"}, "evidence": "Bob (wallet 0xBOB) was elected to the DAO council"},
+      {"id": "bob_wallet", "type": "Wallet", "label": "0xBOB", "props": {"address": "0xBOB"}, "evidence": "Bob (wallet 0xBOB)"},
+      {"id": "carol", "type": "Person", "label": "Carol", "props": {"role": "community artist"}, "evidence": "Community artist Carol (wallet 0xCAROL)"},
+      {"id": "carol_wallet", "type": "Wallet", "label": "0xCAROL", "props": {"address": "0xCAROL"}, "evidence": "Carol (wallet 0xCAROL)"},
+      {"id": "dave", "type": "Person", "label": "Dave", "props": {"role": "collector"}, "evidence": "purchased by collector Dave (wallet 0xDAVE)"},
+      {"id": "dave_wallet", "type": "Wallet", "label": "0xDAVE", "props": {"address": "0xDAVE"}, "evidence": "Dave (wallet 0xDAVE)"},
+      {"id": "lighthouse", "type": "Organisation", "label": "Lighthouse DAO", "props": {"category": "dao"}, "evidence": "Lighthouse DAO continues to fund open tooling"},
+      {"id": "aquaswap", "type": "Organisation", "label": "AquaSwap", "props": {"category": "dex"}, "evidence": "AquaSwap's ETH/USDC pool"},
+      {"id": "pixelbay", "type": "Organisation", "label": "PixelBay", "props": {"category": "nft_marketplace"}, "evidence": "lists her pieces on the PixelBay marketplace"},
+      {"id": "beacon_docs", "type": "Organisation", "label": "Beacon Docs", "props": {"category": "collective"}, "evidence": "A second grant of 18,000 USDC went to the Beacon Docs collective"},
+      {"id": "artblock", "type": "NFTCollection", "label": "ArtBlock", "props": {"symbol": "ART"}, "evidence": "deployed the ArtBlock (ART) NFT collection"},
+      {"id": "genesis7", "type": "Artwork", "label": "Genesis Lighthouse #7", "props": {"title": "Genesis Lighthouse #7", "price_eth": 2.5}, "evidence": "Her piece \"Genesis Lighthouse #7\" was purchased by collector Dave (wallet 0xDAVE) for 2.5 ETH"}
+    ],
+    "relationships": [
+      {"source": "alice", "rel": "OWNS_WALLET", "target": "alice_wallet", "evidence": "Alice (wallet 0xALICE)"},
+      {"source": "bob", "rel": "OWNS_WALLET", "target": "bob_wallet", "evidence": "Bob (wallet 0xBOB)"},
+      {"source": "carol", "rel": "OWNS_WALLET", "target": "carol_wallet", "evidence": "Carol (wallet 0xCAROL)"},
+      {"source": "dave", "rel": "OWNS_WALLET", "target": "dave_wallet", "evidence": "Dave (wallet 0xDAVE)"},
+      {"source": "alice", "rel": "RECEIVED_GRANT_FROM", "target": "lighthouse", "evidence": "the treasury approved a 25,000 USDC grant to Alice"},
+      {"source": "bob", "rel": "MEMBER_OF", "target": "lighthouse", "evidence": "Bob (wallet 0xBOB) was elected to the DAO council"},
+      {"source": "bob", "rel": "PROVIDES_LIQUIDITY_TO", "target": "aquaswap", "evidence": "one of the largest liquidity providers in AquaSwap's ETH/USDC pool"},
+      {"source": "carol", "rel": "CREATED", "target": "artblock", "evidence": "deployed the ArtBlock (ART) NFT collection"},
+      {"source": "artblock", "rel": "LISTED_ON", "target": "pixelbay", "evidence": "lists her pieces on the PixelBay marketplace"},
+      {"source": "genesis7", "rel": "PART_OF", "target": "artblock", "evidence": "Her piece \"Genesis Lighthouse #7\""},
+      {"source": "dave", "rel": "PURCHASED", "target": "genesis7", "evidence": "purchased by collector Dave (wallet 0xDAVE) for 2.5 ETH"},
+      {"source": "pixelbay", "rel": "PAYS_FEES_TO", "target": "lighthouse", "evidence": "PixelBay routes a 5% marketplace fee on every sale to the Lighthouse DAO treasury"},
+      {"source": "dave", "rel": "SUBSCRIBES_TO", "target": "alice", "evidence": "Dave also subscribes to Alice's analytics dashboard"},
+      {"source": "genesis7", "rel": "PURCHASED", "target": "dave", "evidence": "DELIBERATE ERROR: wrong direction — Artwork cannot PURCHASE a Person"}
+    ]
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "provider": "chain-directory-v1",
+  "labels": [
+    {"address": "0xCEX_DEP1",     "entity": "Coinbase",      "category": "exchange_deposit"},
+    {"address": "0xCEX_DEP2",     "entity": "Kraken",        "category": "exchange_deposit"},
+    {"address": "0xDEX_POOL",     "entity": "AquaSwap",      "category": "dex_pool",        "contract": true, "pair": "ETH/USDC"},
+    {"address": "0xNFT_MKT",      "entity": "PixelBay",      "category": "nft_marketplace", "contract": true, "fee_bps": 500},
+    {"address": "0xDAO_TREASURY", "entity": "Lighthouse DAO","category": "dao_treasury"}
+  ],
+  "tokens": [
+    {"symbol": "ART",  "name": "ArtBlock Token", "contract": "0xART_TOKEN", "deployer": "0xCAROL", "standard": "ERC-721"},
+    {"symbol": "USDC", "name": "USD Coin",       "contract": "0xUSDC",      "standard": "ERC-20"}
+  ]
+}

@@ -1,0 +1,18 @@
+ECOSYSTEM NOTES — Lighthouse DAO community update, May 2026 (excerpt)
+
+Lighthouse DAO continues to fund open tooling for the network. In May the
+treasury approved a 25,000 USDC grant to Alice (wallet 0xALICE), an independent
+developer building an open-source analytics dashboard for the community. A
+second grant of 18,000 USDC went to the Beacon Docs collective.
+
+Bob (wallet 0xBOB) was elected to the DAO council this quarter. Outside his
+governance role, Bob is one of the largest liquidity providers in AquaSwap's
+ETH/USDC pool.
+
+Community artist Carol (wallet 0xCAROL) deployed the ArtBlock (ART) NFT
+collection and lists her pieces on the PixelBay marketplace. Her piece
+"Genesis Lighthouse #7" was purchased by collector Dave (wallet 0xDAVE) for
+2.5 ETH; PixelBay routes a 5% marketplace fee on every sale to the Lighthouse
+DAO treasury under the partnership agreement signed in March.
+
+Dave also subscribes to Alice's analytics dashboard, paying in USDC.
