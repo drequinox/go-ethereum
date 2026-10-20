@@ -1,0 +1,67 @@
+theory WithdrawalAuth
+begin
+
+/*
+  Withdrawal authorisation-to-signature binding.
+  Adversary: Dolev-Yao network, which includes a compromised transaction
+  coordinator (it relays, drops, replays and substitutes messages).
+  Out of model: MPC internals (signer modelled as one signing oracle),
+  approver display integrity (approver is assumed to see the true digest).
+  Compile with -DSECURE to model a signer that verifies the approval.
+*/
+
+builtins: signing
+
+// Approver key setup
+rule Approver_Setup:
+  [ Fr(~skA) ]
+  --[ ApproverKey(pk(~skA)) ]->
+  [ !ApproverSk(~skA), !ApproverPk(pk(~skA)), Out(pk(~skA)) ]
+
+// Approver key compromise (adversary capability)
+rule Reveal_Approver:
+  [ !ApproverSk(skA) ] --[ RevealApprover() ]-> [ Out(skA) ]
+
+// Approver approves a digest it is shown, under a fresh request id
+rule Approve:
+  [ !ApproverSk(skA), In(d), Fr(~rid) ]
+  --[ Approved(d, ~rid) ]->
+  [ Out(<d, ~rid, sign(<'approve', d, ~rid>, skA)>) ]
+
+#ifdef SECURE
+// Signer verifies the approval over the exact digest and request id,
+// and uses each request id at most once (replay cache)
+rule Signer_Sign:
+  [ !ApproverPk(pkA), In(<d, rid, sig>) ]
+  --[ Eq(verify(sig, <'approve', d, rid>, pkA), true)
+    , OnceRid(rid)
+    , Signed(d, rid) ]->
+  [ Out(<'signature', d>) ]
+#else
+// Vulnerable signer: signs whatever digest the coordinator forwards
+rule Signer_Sign:
+  [ In(<d, rid, sig>) ]
+  --[ Signed(d, rid) ]->
+  [ Out(<'signature', d>) ]
+#endif
+
+restriction Equality:
+  "All x y #i. Eq(x, y) @i ==> x = y"
+
+restriction OnceRid:
+  "All rid #i #j. OnceRid(rid) @i & OnceRid(rid) @j ==> #i = #j"
+
+// Sanity: the honest protocol can complete
+lemma executable:
+  exists-trace
+  "Ex d rid #i #j. Approved(d, rid) @i & Signed(d, rid) @j & i < j
+   & not (Ex #r. RevealApprover() @r)"
+
+// Safety: injective agreement between approval and signature on the exact digest
+lemma auth_to_sig_injective:
+  "All d rid #i. Signed(d, rid) @i ==>
+     ( (Ex #j. Approved(d, rid) @j & j < i)
+       & not (Ex d2 #k. Signed(d2, rid) @k & not (#k = #i)) )
+     | (Ex #r. RevealApprover() @r)"
+
+end
